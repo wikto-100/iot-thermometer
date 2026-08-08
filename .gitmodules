@@ -1,0 +1,6 @@
+[submodule "external/FreeRTOS-Kernel"]
+	path = external/FreeRTOS-Kernel
+	url = https://github.com/FreeRTOS/FreeRTOS-Kernel.git
+[submodule "external/nrf24l01"]
+	path = external/nrf24l01
+	url = https://github.com/libdriver/nrf24l01

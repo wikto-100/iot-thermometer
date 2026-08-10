@@ -4,3 +4,6 @@
 [submodule "external/nrf24l01"]
 	path = external/nrf24l01
 	url = https://github.com/libdriver/nrf24l01
+[submodule "external/ds18b20"]
+	path = external/ds18b20
+	url = https://github.com/libdriver/ds18b20

@@ -32,6 +32,10 @@ set(FREERTOS_KERNEL_PATH
 set(NRF24L01_PATH
     ${CMAKE_CURRENT_LIST_DIR}/../external/nrf24l01
 )
+# Set the path for the DS18B20 driver
+set(DS18B20_PATH
+    ${CMAKE_CURRENT_LIST_DIR}/../external/ds18b20
+)
 # Set the path for code shared between sensor and base_station
 set(COMMON_PATH
     ${CMAKE_CURRENT_LIST_DIR}/../common
@@ -58,6 +62,9 @@ add_executable(sensor
     ${COMMON_PATH}/nrf24l01/driver_nrf24l01_temperature.c
     nrf24l01/temperature_sender.c
     ${NRF24L01_PATH}/src/driver_nrf24l01.c
+    ds18b20/driver_ds18b20_interface.c
+    ${DS18B20_PATH}/src/driver_ds18b20.c
+    ds18b20/driver_ds18b20_temperature.c
 )
 
 pico_set_program_name(sensor "sensor")
@@ -83,6 +90,9 @@ target_include_directories(sensor PRIVATE
     ${COMMON_PATH}/nrf24l01
     ${NRF24L01_PATH}/src
     ${NRF24L01_PATH}/interface
+    ${CMAKE_CURRENT_LIST_DIR}/ds18b20
+    ${DS18B20_PATH}/src
+    ${DS18B20_PATH}/interface
 )
 
 pico_add_extra_outputs(sensor)

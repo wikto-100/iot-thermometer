@@ -2,39 +2,38 @@
 
 #include "driver_nrf24l01_interface.h"
 #include "driver_nrf24l01_temperature.h"
-
+#include "driver_ds18b20_temperature.h"
 #include "FreeRTOS.h"
 #include "task.h"
 
 #include "pico/stdlib.h"
 
-#define NRF24L01_IRQ_PIN                     21U
+#define NRF24L01_IRQ_PIN 21U
 
-#define NRF24L01_IRQ_TASK_STACK_DEPTH        512U
-#define TEMPERATURE_SENDER_TASK_STACK_DEPTH  512U
+#define SENDER_BUTTON_PIN 15U
 
-#define NRF24L01_IRQ_TASK_PRIORITY           \
+#define NRF24L01_IRQ_TASK_STACK_DEPTH 512U
+#define TEMPERATURE_SENDER_TASK_STACK_DEPTH 512U
+
+#define NRF24L01_IRQ_TASK_PRIORITY \
     (tskIDLE_PRIORITY + 3U)
 
-#define TEMPERATURE_SENDER_TASK_PRIORITY     \
+#define TEMPERATURE_SENDER_TASK_PRIORITY \
     (tskIDLE_PRIORITY + 2U)
-
-#define TEMPERATURE_SEND_PERIOD_MS           1000U
 
 /*
  * Temporary test temperature:
  * 2345 represents 23.45 degrees Celsius.
  */
-#define TEST_TEMPERATURE_CENTI_C             2345
+#define TEST_TEMPERATURE_CENTI_C 2345
 
 static TaskHandle_t gs_nrf24l01_irq_task_handle = NULL;
-
+static TaskHandle_t temperature_sender_task_handle = NULL;
 /**
  * @brief Return the positive fractional component for printing
  */
 static unsigned int temperature_fraction(
-    int16_t temperature_centi_c
-)
+    int16_t temperature_centi_c)
 {
     int16_t fraction = temperature_centi_c % 100;
 
@@ -59,123 +58,118 @@ static void temperature_sender_callback(
     uint8_t type,
     uint8_t pipe,
     uint8_t *buf,
-    uint8_t len
-)
+    uint8_t len)
 {
     switch (type)
     {
-        case NRF24L01_INTERRUPT_RX_DR:
+    case NRF24L01_INTERRUPT_RX_DR:
+    {
+        nrf24l01_temperature_payload_t payload;
+
+        if (pipe != 0U)
         {
-            nrf24l01_temperature_payload_t payload;
-
-            if (pipe != 0U)
-            {
-                nrf24l01_interface_debug_print(
-                    "nrf24l01 sender: unexpected pipe %u.\n",
-                    pipe
-                );
-
-                break;
-            }
-
-            if (nrf24l01_temperature_decode(
-                    buf,
-                    len,
-                    &payload) != 0)
-            {
-                nrf24l01_interface_debug_print(
-                    "nrf24l01 sender: invalid payload length %u.\n",
-                    len
-                );
-
-                break;
-            }
-
             nrf24l01_interface_debug_print(
-                "nrf24l01 sender: received %d.%02u C.\n",
-                payload.temperature_centi_c / 100,
-                temperature_fraction(
-                    payload.temperature_centi_c
-                )
-            );
+                "nrf24l01 sender: unexpected pipe %u.\n",
+                pipe);
 
             break;
         }
 
-        case NRF24L01_INTERRUPT_TX_DS:
+        if (nrf24l01_temperature_decode(
+                buf,
+                len,
+                &payload) != 0)
         {
             nrf24l01_interface_debug_print(
-                "nrf24l01 sender: irq send ok.\n"
-            );
+                "nrf24l01 sender: invalid payload length %u.\n",
+                len);
 
             break;
         }
 
-        case NRF24L01_INTERRUPT_MAX_RT:
-        {
-            nrf24l01_interface_debug_print(
-                "nrf24l01 sender: irq reach max retry times.\n"
-            );
+        nrf24l01_interface_debug_print(
+            "nrf24l01 sender: received %d.%02u C.\n",
+            payload.temperature_centi_c / 100,
+            temperature_fraction(
+                payload.temperature_centi_c));
 
-            break;
-        }
+        break;
+    }
 
-        case NRF24L01_INTERRUPT_TX_FULL:
-        {
-            nrf24l01_interface_debug_print(
-                "nrf24l01 sender: irq tx full.\n"
-            );
+    case NRF24L01_INTERRUPT_TX_DS:
+    {
+        nrf24l01_interface_debug_print(
+            "nrf24l01 sender: irq send ok.\n");
 
-            break;
-        }
+        break;
+    }
 
-        default:
-        {
-            nrf24l01_interface_debug_print(
-                "nrf24l01 sender: unknown code.\n"
-            );
+    case NRF24L01_INTERRUPT_MAX_RT:
+    {
+        nrf24l01_interface_debug_print(
+            "nrf24l01 sender: irq reach max retry times.\n");
 
-            break;
-        }
+        break;
+    }
+
+    case NRF24L01_INTERRUPT_TX_FULL:
+    {
+        nrf24l01_interface_debug_print(
+            "nrf24l01 sender: irq tx full.\n");
+
+        break;
+    }
+
+    default:
+    {
+        nrf24l01_interface_debug_print(
+            "nrf24l01 sender: unknown code.\n");
+
+        break;
+    }
     }
 }
 
 /**
- * @brief Wake the nRF24L01 IRQ task when the IRQ pin falls
+ * @brief Wake the IRQ task when the IRQ pin falls/rises
  *
  * This executes in hardware-interrupt context. Radio-driver calls
  * and SPI communication are deferred to nrf24l01_irq_task().
  */
-static void nrf24l01_gpio_irq_callback(
+static void gpio_irq_callback(
     uint gpio,
-    uint32_t events
-)
+    uint32_t events)
 {
     BaseType_t higher_priority_task_woken = pdFALSE;
+    TaskHandle_t task_to_notify = NULL;
+    uint32_t expected_edge;
 
-    if (gpio != NRF24L01_IRQ_PIN)
+    if (gpio == NRF24L01_IRQ_PIN)
+    {
+        task_to_notify = gs_nrf24l01_irq_task_handle;
+        expected_edge = GPIO_IRQ_EDGE_FALL;
+    }
+    else if (gpio == SENDER_BUTTON_PIN)
+    {
+        task_to_notify = temperature_sender_task_handle;
+        expected_edge = GPIO_IRQ_EDGE_RISE;
+    }
+    if (task_to_notify == NULL)
     {
         return;
     }
-
-    if ((events & GPIO_IRQ_EDGE_FALL) == 0)
-    {
-        return;
-    }
-
-    if (gs_nrf24l01_irq_task_handle == NULL)
+    if ((events & expected_edge) == 0)
     {
         return;
     }
 
     vTaskNotifyGiveFromISR(
-        gs_nrf24l01_irq_task_handle,
-        &higher_priority_task_woken
-    );
+        task_to_notify,
+        &higher_priority_task_woken);
 
     portYIELD_FROM_ISR(
-        higher_priority_task_woken
-    );
+        higher_priority_task_woken);
+    return;
 }
 
 /**
@@ -196,8 +190,7 @@ static void nrf24l01_irq_task(void *parameter)
          */
         (void)ulTaskNotifyTake(
             pdTRUE,
-            portMAX_DELAY
-        );
+            portMAX_DELAY);
 
         /*
          * The nRF24L01+ holds IRQ low until its pending status flags
@@ -211,8 +204,7 @@ static void nrf24l01_irq_task(void *parameter)
             if (nrf24l01_temperature_irq_handler() != 0)
             {
                 nrf24l01_interface_debug_print(
-                    "nrf24l01 sender: IRQ handler failed.\n"
-                );
+                    "nrf24l01 sender: IRQ handler failed.\n");
 
                 /*
                  * Prevent a tight retry loop after a persistent
@@ -244,8 +236,7 @@ static uint8_t nrf24l01_irq_setup(void)
         NRF24L01_IRQ_TASK_STACK_DEPTH,
         NULL,
         NRF24L01_IRQ_TASK_PRIORITY,
-        &gs_nrf24l01_irq_task_handle
-    );
+        &gs_nrf24l01_irq_task_handle);
 
     if (result != pdPASS)
     {
@@ -265,8 +256,7 @@ static uint8_t nrf24l01_irq_setup(void)
         NRF24L01_IRQ_PIN,
         GPIO_IRQ_EDGE_FALL,
         true,
-        nrf24l01_gpio_irq_callback
-    );
+        gpio_irq_callback);
 
     /*
      * An event could become pending immediately before falling-edge
@@ -276,11 +266,20 @@ static uint8_t nrf24l01_irq_setup(void)
     if (gpio_get(NRF24L01_IRQ_PIN) == 0)
     {
         xTaskNotifyGive(
-            gs_nrf24l01_irq_task_handle
-        );
+            gs_nrf24l01_irq_task_handle);
     }
 
     return 0;
+}
+
+static void sender_button_setup(void)
+{
+    gpio_init(SENDER_BUTTON_PIN);
+    gpio_set_dir(SENDER_BUTTON_PIN, GPIO_IN);
+    gpio_set_irq_enabled(
+        SENDER_BUTTON_PIN,
+        GPIO_IRQ_EDGE_RISE,
+        true);
 }
 
 /**
@@ -288,11 +287,18 @@ static uint8_t nrf24l01_irq_setup(void)
  */
 static void temperature_sender_task(void *parameter)
 {
-    TickType_t last_wake_time;
     nrf24l01_temperature_payload_t payload;
 
     (void)parameter;
 
+    if (ds18b20_temperature_init() != 0U)
+    {
+        nrf24l01_interface_debug_print(
+            "temperature sender: sensor initialization failed.\n");
+
+        vTaskDelete(NULL);
+        return;
+    }
     /*
      * Configure the radio as the temperature transmitter.
      *
@@ -304,9 +310,9 @@ static void temperature_sender_task(void *parameter)
             temperature_sender_callback) != 0)
     {
         nrf24l01_interface_debug_print(
-            "nrf24l01 sender: radio initialization failed.\n"
-        );
+            "nrf24l01 sender: radio initialization failed.\n");
 
+        (void)ds18b20_temperature_deinit();
         vTaskDelete(NULL);
         return;
     }
@@ -318,8 +324,7 @@ static void temperature_sender_task(void *parameter)
     if (nrf24l01_irq_setup() != 0)
     {
         nrf24l01_interface_debug_print(
-            "nrf24l01 sender: IRQ setup failed.\n"
-        );
+            "nrf24l01 sender: IRQ setup failed.\n");
 
         (void)nrf24l01_temperature_deinit();
 
@@ -327,43 +332,37 @@ static void temperature_sender_task(void *parameter)
         return;
     }
 
-    /*
-     * Replace this value with the real temperature sensor reading
-     * later.
-     */
-    payload.temperature_centi_c =
-        TEST_TEMPERATURE_CENTI_C;
+    sender_button_setup();
 
-    last_wake_time = xTaskGetTickCount();
 
     for (;;)
     {
+        (void)ulTaskNotifyTake(
+            pdTRUE,
+            portMAX_DELAY);
+
+        if (ds18b20_temperature_read(
+                &payload.temperature_centi_c) != 0U)
+        {
+            nrf24l01_interface_debug_print(
+                "temperature sender: sensor read failed.\n");
+
+            continue;
+        }
+
         if (nrf24l01_temperature_send(&payload) == 0)
         {
             nrf24l01_interface_debug_print(
                 "nrf24l01 sender: sent %d.%02u C.\n",
                 payload.temperature_centi_c / 100,
                 temperature_fraction(
-                    payload.temperature_centi_c
-                )
-            );
+                    payload.temperature_centi_c));
         }
         else
         {
             nrf24l01_interface_debug_print(
-                "nrf24l01 sender: send failed.\n"
-            );
+                "nrf24l01 sender: send failed.\n");
         }
-
-        /*
-         * Maintain an approximately one-second transmission period.
-         */
-        vTaskDelayUntil(
-            &last_wake_time,
-            pdMS_TO_TICKS(
-                TEMPERATURE_SEND_PERIOD_MS
-            )
-        );
     }
 }
 
@@ -380,8 +379,7 @@ uint8_t temperature_sender_start(void)
         TEMPERATURE_SENDER_TASK_STACK_DEPTH,
         NULL,
         TEMPERATURE_SENDER_TASK_PRIORITY,
-        NULL
-    );
+        &temperature_sender_task_handle);
 
     if (result != pdPASS)
     {

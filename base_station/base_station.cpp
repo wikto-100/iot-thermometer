@@ -1,5 +1,5 @@
 #include "temperature_receiver.h"
-
+#include "base_station_network.h"
 #include "FreeRTOS.h"
 #include "task.h"
 
@@ -14,6 +14,10 @@ int main(void)
         return 1;
     }
 
+    if (base_station_network_start() != 0)
+    {
+        return 1;
+    }
     vTaskStartScheduler();
 
     /*

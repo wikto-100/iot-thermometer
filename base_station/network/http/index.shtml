@@ -1,0 +1,12 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>IOT-Thermometer base station</title>
+</head>
+<body>
+    <h1>IOT-Thermometer base station</h1>
+    <p>Temperature is <!--#temperature--> &deg;</p>
+</body>
+</html>

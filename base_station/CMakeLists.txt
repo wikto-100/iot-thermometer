@@ -25,6 +25,10 @@ endif()
 # ====================================================================================
 set(PICO_BOARD pico2_w CACHE STRING "Board type")
 
+# Wifi credentials
+set(WIFI_SSID "" CACHE STRING "Wi-Fi network name")
+set(WIFI_PASSWORD "" CACHE STRING "Wi-Fi password")
+
 # Set the path for the FreeRTOS kernel
 set(FREERTOS_KERNEL_PATH
     ${CMAKE_CURRENT_LIST_DIR}/../external/FreeRTOS-Kernel
@@ -62,6 +66,7 @@ add_executable(base_station
     ${COMMON_PATH}/nrf24l01/driver_nrf24l01_temperature.c
     nrf24l01/temperature_receiver.c
     ${NRF24L01_PATH}/src/driver_nrf24l01.c
+    network/base_station_network.c
 )
 
 pico_set_program_name(base_station "base_station")
@@ -71,14 +76,31 @@ pico_set_program_version(base_station "0.1")
 pico_enable_stdio_uart(base_station 1)
 pico_enable_stdio_usb(base_station 1)
 
+pico_add_library(base_station_http_content NOFLAG)
+
+pico_set_lwip_httpd_content(
+    base_station_http_content
+    INTERFACE
+    ${CMAKE_CURRENT_LIST_DIR}/network/http/404.html
+    ${CMAKE_CURRENT_LIST_DIR}/network/http/index.shtml
+)
+
+
+target_compile_definitions(base_station PRIVATE
+    WIFI_SSID="${WIFI_SSID}"
+    WIFI_PASSWORD="${WIFI_PASSWORD}"
+)
+
 # Add the standard include files to the build
 target_include_directories(base_station PRIVATE
         ${CMAKE_CURRENT_LIST_DIR}
         ${CMAKE_CURRENT_LIST_DIR}/nrf24l01
+        ${CMAKE_CURRENT_LIST_DIR}/network
         ${COMMON_PATH}
         ${COMMON_PATH}/nrf24l01
         ${NRF24L01_PATH}/src
         ${NRF24L01_PATH}/interface
+        ${PICO_LWIP_CONTRIB_PATH}/apps/httpd
 )
 
 # Add the standard library to the build
@@ -87,6 +109,9 @@ target_link_libraries(base_station
     hardware_spi
     FreeRTOS-Kernel
     FreeRTOS-Kernel-Heap4
+    pico_cyw43_arch_lwip_sys_freertos
+    pico_lwip_http
+    base_station_http_content
 )
 
 

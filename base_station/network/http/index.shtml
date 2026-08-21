@@ -4,9 +4,111 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>IOT-Thermometer base station</title>
+    <style>
+        body { font-family: sans-serif; }
+        canvas { max-width: 100%; border: 1px solid #ccc; }
+    </style>
 </head>
 <body>
     <h1>IOT-Thermometer base station</h1>
-    <p>Temperature is <!--#temperature--> &deg;</p>
+    <p>Latest temperature: <span id="latest">--.--</span> &deg;C</p>
+    <canvas id="chart" width="720" height="300"></canvas>
+    <script>
+        var gsLastRawResponse = null;
+
+        function formatElapsed(ms) {
+            var totalSeconds = Math.floor(ms / 1000);
+            var minutes = Math.floor(totalSeconds / 60);
+            var seconds = totalSeconds % 60;
+            var secondsText = seconds < 10 ? "0" + seconds : String(seconds);
+
+            return minutes > 0 ? (minutes + "m" + secondsText + "s") : (seconds + "s");
+        }
+
+        function drawChart(times, values) {
+            var canvas = document.getElementById("chart");
+            var ctx = canvas.getContext("2d");
+            var width = canvas.width;
+            var height = canvas.height;
+            var padding = { left: 55, right: 10, top: 10, bottom: 30 };
+            var plotWidth = width - padding.left - padding.right;
+            var plotHeight = height - padding.top - padding.bottom;
+
+            ctx.clearRect(0, 0, width, height);
+
+            if (values.length === 0) {
+                return;
+            }
+
+            var minValue = 0;
+            var maxValue = 100;
+            var valueRange = maxValue - minValue;
+            var barCount = values.length;
+            var barSlot = plotWidth / barCount;
+            var barWidth = Math.max(barSlot * 0.7, 1);
+
+            ctx.strokeStyle = "#333";
+            ctx.beginPath();
+            ctx.moveTo(padding.left, padding.top);
+            ctx.lineTo(padding.left, padding.top + plotHeight);
+            ctx.lineTo(padding.left + plotWidth, padding.top + plotHeight);
+            ctx.stroke();
+
+            ctx.fillStyle = "#3366cc";
+            for (var i = 0; i < barCount; i++) {
+                var normalized = (values[i] - minValue) / valueRange;
+                var barHeight = normalized * plotHeight;
+                var x = padding.left + i * barSlot + (barSlot - barWidth) / 2;
+                var y = padding.top + plotHeight - barHeight;
+                ctx.fillRect(x, y, barWidth, barHeight);
+            }
+
+            ctx.fillStyle = "#000";
+            ctx.font = "10px sans-serif";
+            ctx.textAlign = "right";
+            ctx.textBaseline = "middle";
+            var yTicks = 4;
+            for (var t = 0; t <= yTicks; t++) {
+                var value = minValue + (valueRange * t / yTicks);
+                var y = padding.top + plotHeight - (plotHeight * t / yTicks);
+                ctx.fillText(value.toFixed(2), padding.left - 5, y);
+            }
+
+            ctx.textAlign = "center";
+            ctx.textBaseline = "top";
+            var xTickStep = Math.max(Math.floor(barCount / 6), 1);
+            for (var i = 0; i < barCount; i += xTickStep) {
+                var x = padding.left + i * barSlot + barSlot / 2;
+                ctx.fillText(formatElapsed(times[i]), x, padding.top + plotHeight + 5);
+            }
+        }
+
+        function refresh() {
+            fetch("/temphist.json", { cache: "no-store" })
+                .then(function (response) { return response.text(); })
+                .then(function (rawText) {
+                    /* Skip redrawing when the readings have not changed. */
+                    if (rawText === gsLastRawResponse) {
+                        return;
+                    }
+                    gsLastRawResponse = rawText;
+
+                    var data = JSON.parse(rawText);
+                    var times = data.t || [];
+                    var values = data.v || [];
+
+                    if (values.length > 0) {
+                        document.getElementById("latest").textContent =
+                            values[values.length - 1].toFixed(2);
+                    }
+
+                    drawChart(times, values);
+                })
+                .catch(function () { /* keep showing the last successful chart */ });
+        }
+
+        refresh();
+        setInterval(refresh, 1000);
+    </script>
 </body>
 </html>

@@ -21,7 +21,13 @@
 #endif
 #define MEM_ALIGNMENT               4
 #ifndef MEM_SIZE
-#define MEM_SIZE                    4000
+/*
+ * Each SSI connection allocates a struct http_ssi_state holding a
+ * tag_insert[LWIP_HTTPD_MAX_TAG_INSERT_LEN + 1] buffer from this heap, so
+ * bump past the default 4000 bytes to leave room for that plus lwIP's own
+ * allocations across a couple of concurrent connections.
+ */
+#define MEM_SIZE                    8000
 #endif
 #define MEMP_NUM_TCP_SEG            32
 #define MEMP_NUM_ARP_QUEUE          10
@@ -102,8 +108,22 @@
 #define LWIP_HTTPD_SSI                    1
 #define LWIP_HTTPD_SSI_MULTIPART          0
 
+/*
+ * Replace <!--#tag--> with its inserted value instead of leaving the
+ * raw tag text in the output. Required for SSI tags used inside
+ * <script> blocks, where "<!--" is not a valid JS comment opener.
+ */
+#define LWIP_HTTPD_SSI_INCLUDE_TAG        0
+
 
 #define LWIP_HTTPD_MAX_TAG_NAME_LEN       16
+
+/*
+ * Large enough for {"t":[...],"v":[...]} holding TEMPERATURE_STORE_CAPACITY
+ * (48) readings: 48 timestamps (up to 10 digits) + 48 "-327.67" worst-case
+ * values, plus separators ~= 950 bytes.
+ */
+#define LWIP_HTTPD_MAX_TAG_INSERT_LEN     1024
 
 #if !NO_SYS
 #define TCPIP_THREAD_STACKSIZE            1024

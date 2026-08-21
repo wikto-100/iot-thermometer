@@ -1,5 +1,7 @@
-#include "temperature_receiver.h"
 #include "base_station_network.h"
+#include "temperature_receiver.h"
+#include "temperature_store.h"
+
 #include "FreeRTOS.h"
 #include "task.h"
 
@@ -8,6 +10,11 @@
 int main(void)
 {
     stdio_init_all();
+
+    if (temperature_store_init() != 0)
+    {
+        return 1;
+    }
 
     if (temperature_receiver_start() != 0)
     {
@@ -18,11 +25,10 @@ int main(void)
     {
         return 1;
     }
+
     vTaskStartScheduler();
 
-    /*
-     * The scheduler only returns when it could not be started.
-     */
+    /* The scheduler returns only when it could not be started. */
     for (;;)
     {
         tight_loop_contents();

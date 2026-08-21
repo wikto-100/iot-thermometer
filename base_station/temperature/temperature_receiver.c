@@ -1,28 +1,28 @@
 #include "temperature_receiver.h"
 
+#include "temperature_store.h"
+
 #include "driver_nrf24l01_interface.h"
 #include "driver_nrf24l01_temperature.h"
+
+#include "task_utils.h"
 
 #include "FreeRTOS.h"
 #include "task.h"
 
 #include "pico/stdlib.h"
-#include "queue.h"
 
 #define NRF24L01_IRQ_PIN 21U
 #define TEMPERATURE_RECEIVER_TASK_STACK_DEPTH 512U
-
 #define TEMPERATURE_RECEIVER_TASK_PRIORITY \
     (tskIDLE_PRIORITY + 2U)
 
 static TaskHandle_t gs_temperature_receiver_task_handle = NULL;
-static QueueHandle_t gs_latest_temperature_queue = NULL;
 
 /**
- * @brief Print a temperature represented in hundredths of a degree
+ * @brief Print a temperature represented in hundredths of a degree Celsius
  */
-static void temperature_receiver_print(
-    int16_t temperature_centi_c)
+static void temperature_receiver_print(int16_t temperature_centi_c)
 {
     int32_t value = temperature_centi_c;
 
@@ -44,35 +44,11 @@ static void temperature_receiver_print(
     }
 }
 
-uint8_t temperature_receiver_get_latest(
-    int16_t *temperature_centi_c)
-{
-    if (temperature_centi_c == NULL)
-    {
-        return 1;
-    }
-
-    if (gs_latest_temperature_queue == NULL)
-    {
-        return 1;
-    }
-
-    if (xQueuePeek(
-            gs_latest_temperature_queue,
-            temperature_centi_c,
-            0) != pdTRUE)
-    {
-        return 1;
-    }
-
-    return 0;
-}
-
 /**
  * @brief Process an event reported by the radio driver
  *
- * This callback executes in the receiver task because that task
- * calls nrf24l01_temperature_irq_handler().
+ * This callback executes in the receiver task because that task calls
+ * nrf24l01_temperature_irq_handler().
  */
 static void temperature_receiver_callback(
     uint8_t type,
@@ -84,80 +60,83 @@ static void temperature_receiver_callback(
 
     switch (type)
     {
-    case NRF24L01_INTERRUPT_RX_DR:
-    {
-        if (pipe != 0U)
+        case NRF24L01_INTERRUPT_RX_DR:
+        {
+            if (pipe != 0U)
+            {
+                nrf24l01_interface_debug_print(
+                    "temperature receiver: unexpected pipe %u.\n",
+                    pipe);
+
+                return;
+            }
+
+            if (nrf24l01_temperature_decode(
+                    buf,
+                    len,
+                    &payload) != 0)
+            {
+                nrf24l01_interface_debug_print(
+                    "temperature receiver: invalid payload length %u.\n",
+                    len);
+
+                return;
+            }
+
+            if (temperature_store_set(
+                    payload.temperature_centi_c) != 0)
+            {
+                nrf24l01_interface_debug_print(
+                    "temperature receiver: could not publish reading.\n");
+
+                return;
+            }
+
+            temperature_receiver_print(
+                payload.temperature_centi_c);
+
+            break;
+        }
+
+        case NRF24L01_INTERRUPT_TX_DS:
         {
             nrf24l01_interface_debug_print(
-                "temperature receiver: unexpected pipe %u.\n",
-                pipe);
+                "temperature receiver: TX_DS event.\n");
 
-            return;
+            break;
         }
 
-        if (nrf24l01_temperature_decode(
-                buf,
-                len,
-                &payload) != 0)
+        case NRF24L01_INTERRUPT_MAX_RT:
         {
             nrf24l01_interface_debug_print(
-                "temperature receiver: invalid payload length %u.\n",
-                len);
+                "temperature receiver: MAX_RT event.\n");
 
-            return;
+            break;
         }
-        if (gs_latest_temperature_queue != NULL)
+
+        case NRF24L01_INTERRUPT_TX_FULL:
         {
-            (void)xQueueOverwrite(
-                gs_latest_temperature_queue,
-                &payload.temperature_centi_c);
+            nrf24l01_interface_debug_print(
+                "temperature receiver: TX FIFO full.\n");
+
+            break;
         }
 
-        temperature_receiver_print(
-            payload.temperature_centi_c);
+        default:
+        {
+            nrf24l01_interface_debug_print(
+                "temperature receiver: unknown event %u.\n",
+                type);
 
-        break;
-    }
-
-    case NRF24L01_INTERRUPT_TX_DS:
-    {
-        nrf24l01_interface_debug_print(
-            "temperature receiver: TX_DS event.\n");
-
-        break;
-    }
-
-    case NRF24L01_INTERRUPT_MAX_RT:
-    {
-        nrf24l01_interface_debug_print(
-            "temperature receiver: MAX_RT event.\n");
-
-        break;
-    }
-
-    case NRF24L01_INTERRUPT_TX_FULL:
-    {
-        nrf24l01_interface_debug_print(
-            "temperature receiver: TX FIFO full.\n");
-
-        break;
-    }
-
-    default:
-    {
-        nrf24l01_interface_debug_print(
-            "temperature receiver: unknown event %u.\n",
-            type);
-
-        break;
-    }
+            break;
+        }
     }
 }
 
 /**
- * @brief Wake the receiver task when the radio IRQ pin falls
+ * @brief Wake the receiver task when the active-low radio IRQ pin falls
  *
- * This executes in hardware-interrupt context.
+ * This callback executes in hardware-interrupt context.
  */
 static void temperature_receiver_gpio_irq_callback(
     uint gpio,
@@ -184,8 +163,7 @@ static void temperature_receiver_gpio_irq_callback(
         gs_temperature_receiver_task_handle,
         &higher_priority_task_woken);
 
-    portYIELD_FROM_ISR(
-        higher_priority_task_woken);
+    portYIELD_FROM_ISR(higher_priority_task_woken);
 }
 
 /**
@@ -203,19 +181,15 @@ static void temperature_receiver_irq_setup(void)
         true,
         temperature_receiver_gpio_irq_callback);
 
-    /*
-     * Catch an interrupt that became active before falling-edge
-     * detection was enabled.
-     */
+    /* Catch an interrupt that became active before edge detection. */
     if (gpio_get(NRF24L01_IRQ_PIN) == 0)
     {
-        xTaskNotifyGive(
-            gs_temperature_receiver_task_handle);
+        xTaskNotifyGive(gs_temperature_receiver_task_handle);
     }
 }
 
 /**
- * @brief Initialize the receiver and process radio interrupts
+ * @brief Initialize the radio receiver and process its interrupts
  */
 static void temperature_receiver_task(void *parameter)
 {
@@ -232,7 +206,6 @@ static void temperature_receiver_task(void *parameter)
             "temperature receiver: radio initialization failed.\n");
 
         gs_temperature_receiver_task_handle = NULL;
-
         vTaskDelete(NULL);
         return;
     }
@@ -244,16 +217,10 @@ static void temperature_receiver_task(void *parameter)
 
     for (;;)
     {
-        /*
-         * Wait until the GPIO interrupt wakes this task.
-         */
         (void)ulTaskNotifyTake(
             pdTRUE,
             portMAX_DELAY);
 
-        /*
-         * Handle every pending radio event.
-         */
         while (gpio_get(NRF24L01_IRQ_PIN) == 0)
         {
             if (nrf24l01_temperature_irq_handler() != 0)
@@ -267,37 +234,12 @@ static void temperature_receiver_task(void *parameter)
     }
 }
 
-/**
- * @brief Create the receiver task
- */
 uint8_t temperature_receiver_start(void)
 {
-    BaseType_t result;
-
-    gs_latest_temperature_queue = xQueueCreate(
-        1,
-        sizeof(int16_t));
-
-    if (gs_latest_temperature_queue == NULL)
-    {
-        return 1;
-    }
-
-    result = xTaskCreate(
+    return task_utils_create(
         temperature_receiver_task,
         "temperature_rx",
         TEMPERATURE_RECEIVER_TASK_STACK_DEPTH,
         NULL,
-        TEMPERATURE_RECEIVER_TASK_PRIORITY,
-        NULL);
-
-    if (result != pdPASS)
-    {
-        vQueueDelete(gs_latest_temperature_queue);
-        gs_latest_temperature_queue = NULL;
-
-        return 1;
-    }
-
-    return 0;
+        TEMPERATURE_RECEIVER_TASK_PRIORITY);
 }

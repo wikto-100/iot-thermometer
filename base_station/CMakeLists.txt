@@ -60,13 +60,18 @@ pico_sdk_init()
 # Add executable. Default name is the project name, version 0.1
 
 add_executable(base_station
-    base_station.cpp
+    app/main.c
+    task_utils.c
     ${COMMON_PATH}/hooks.cpp
     ${COMMON_PATH}/nrf24l01/driver_nrf24l01_interface.c
     ${COMMON_PATH}/nrf24l01/driver_nrf24l01_temperature.c
-    nrf24l01/temperature_receiver.c
     ${NRF24L01_PATH}/src/driver_nrf24l01.c
+    temperature/temperature_receiver.c
+    temperature/temperature_store.c
     network/base_station_network.c
+    network/wifi_station.c
+    web/web_server.c
+    web/temperature_ssi.c
 )
 
 pico_set_program_name(base_station "base_station")
@@ -83,6 +88,7 @@ pico_set_lwip_httpd_content(
     INTERFACE
     ${CMAKE_CURRENT_LIST_DIR}/network/http/404.html
     ${CMAKE_CURRENT_LIST_DIR}/network/http/index.shtml
+    ${CMAKE_CURRENT_LIST_DIR}/network/http/temphist.json
 )
 
 
@@ -94,8 +100,9 @@ target_compile_definitions(base_station PRIVATE
 # Add the standard include files to the build
 target_include_directories(base_station PRIVATE
         ${CMAKE_CURRENT_LIST_DIR}
-        ${CMAKE_CURRENT_LIST_DIR}/nrf24l01
         ${CMAKE_CURRENT_LIST_DIR}/network
+        ${CMAKE_CURRENT_LIST_DIR}/temperature
+        ${CMAKE_CURRENT_LIST_DIR}/web
         ${COMMON_PATH}
         ${COMMON_PATH}/nrf24l01
         ${NRF24L01_PATH}/src

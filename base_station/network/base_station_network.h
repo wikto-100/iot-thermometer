@@ -3,19 +3,11 @@
 
 #include <stdint.h>
 
-
-#ifdef __cplusplus
-extern "C" {
-#endif
-
 /**
- * @brief Create the base-station network task
+ * @brief Create the task that connects Wi-Fi and starts the HTTP server
  *
- * @return 0 on success, 1 if task creation failed
+ * @return 0 on success, 1 when task creation fails
  */
 uint8_t base_station_network_start(void);
-#ifdef __cplusplus
-}
-#endif
 
 #endif

@@ -49,10 +49,9 @@ static unsigned int temperature_fraction(
  * @brief Process an event reported by the radio driver
  *
  * This callback executes in the IRQ task because that task calls
- * nrf24l01_temperature_irq_handler(). RX_DR is not expected today
- * since the base station only acknowledges sends, but decoding it
- * here means the sender is ready once the base station also
- * transmits back to it.
+ * nrf24l01_temperature_irq_handler(). A REQUEST wakes
+ * temperature_sender_task the same way a button press does, so both
+ * paths share the same read-and-send code.
  */
 static void temperature_sender_callback(
     uint8_t type,
@@ -87,11 +86,22 @@ static void temperature_sender_callback(
             break;
         }
 
-        nrf24l01_interface_debug_print(
-            "nrf24l01 sender: received %d.%02u C.\n",
-            payload.temperature_centi_c / 100,
-            temperature_fraction(
-                payload.temperature_centi_c));
+        if (payload.opcode == NRF24L01_TEMPERATURE_OPCODE_REQUEST)
+        {
+            nrf24l01_interface_debug_print(
+                "nrf24l01 sender: request received.\n");
+
+            if (temperature_sender_task_handle != NULL)
+            {
+                xTaskNotifyGive(temperature_sender_task_handle);
+            }
+        }
+        else
+        {
+            nrf24l01_interface_debug_print(
+                "nrf24l01 sender: unexpected opcode %u.\n",
+                (unsigned int)payload.opcode);
+        }
 
         break;
     }
@@ -300,13 +310,15 @@ static void temperature_sender_task(void *parameter)
         return;
     }
     /*
-     * Configure the radio as the temperature transmitter.
+     * The radio listens by default so it can receive a REQUEST from
+     * the base station at any time; sending (button press or REQUEST
+     * reply) briefly switches to TX and back.
      *
      * temperature_sender_callback() reports TX_DS, MAX_RT, RX_DR,
      * and TX_FULL events, decoding RX_DR as a temperature payload.
      */
     if (nrf24l01_temperature_init(
-            NRF24L01_TEMPERATURE_TYPE_TX,
+            NRF24L01_TEMPERATURE_TYPE_RX,
             temperature_sender_callback) != 0)
     {
         nrf24l01_interface_debug_print(
@@ -337,6 +349,10 @@ static void temperature_sender_task(void *parameter)
 
     for (;;)
     {
+        /*
+         * Woken either by the local button or by a REQUEST decoded in
+         * temperature_sender_callback() - both want the same action.
+         */
         (void)ulTaskNotifyTake(
             pdTRUE,
             portMAX_DELAY);
@@ -346,6 +362,17 @@ static void temperature_sender_task(void *parameter)
         {
             nrf24l01_interface_debug_print(
                 "temperature sender: sensor read failed.\n");
+
+            continue;
+        }
+
+        payload.opcode = NRF24L01_TEMPERATURE_OPCODE_READING;
+
+        if (nrf24l01_temperature_set_mode(
+                NRF24L01_TEMPERATURE_TYPE_TX) != 0)
+        {
+            nrf24l01_interface_debug_print(
+                "nrf24l01 sender: switch to TX failed.\n");
 
             continue;
         }
@@ -362,6 +389,18 @@ static void temperature_sender_task(void *parameter)
         {
             nrf24l01_interface_debug_print(
                 "nrf24l01 sender: send failed.\n");
+        }
+
+        /*
+         * Always try to resume listening, even after a failed send,
+         * so a single lost packet doesn't strand the sensor deaf to
+         * future requests.
+         */
+        if (nrf24l01_temperature_set_mode(
+                NRF24L01_TEMPERATURE_TYPE_RX) != 0)
+        {
+            nrf24l01_interface_debug_print(
+                "nrf24l01 sender: switch to RX failed.\n");
         }
     }
 }

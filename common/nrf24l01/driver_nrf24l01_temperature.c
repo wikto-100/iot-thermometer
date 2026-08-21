@@ -656,30 +656,89 @@ uint8_t nrf24l01_temperature_deinit(void)
 }
 
 /**
+ * @brief Switch the already-initialized radio between TX and RX at runtime
+ */
+uint8_t nrf24l01_temperature_set_mode(
+    nrf24l01_temperature_type_t type
+)
+{
+    if (type != NRF24L01_TEMPERATURE_TYPE_TX &&
+        type != NRF24L01_TEMPERATURE_TYPE_RX)
+    {
+        return 1;
+    }
+
+    /*
+     * CE must be low while changing PRIM_RX.
+     */
+    if (nrf24l01_set_active(
+            &gs_temperature_handle,
+            NRF24L01_BOOL_FALSE) != 0)
+    {
+        return 1;
+    }
+
+    if (nrf24l01_set_mode(
+            &gs_temperature_handle,
+            (type == NRF24L01_TEMPERATURE_TYPE_TX)
+                ? NRF24L01_MODE_TX
+                : NRF24L01_MODE_RX) != 0)
+    {
+        return 1;
+    }
+
+    /*
+     * In RX mode this resumes listening immediately. In TX mode,
+     * nrf24l01_temperature_send() lowers CE again before loading a
+     * payload, matching the behavior at initial configuration.
+     */
+    if (nrf24l01_set_active(
+            &gs_temperature_handle,
+            NRF24L01_BOOL_TRUE) != 0)
+    {
+        return 1;
+    }
+
+    return 0;
+}
+
+/**
  * @brief Send one temperature payload
  */
 uint8_t nrf24l01_temperature_send(
     const nrf24l01_temperature_payload_t *payload
 )
 {
-    uint16_t encoded_temperature;
     uint8_t buffer[NRF24L01_TEMPERATURE_PAYLOAD_SIZE];
+    uint8_t length;
 
     if (payload == NULL)
     {
         return 1;
     }
 
-    /*
-     * Encode the signed temperature explicitly as little-endian.
-     *
-     * Casting to uint16_t preserves the two's-complement bit pattern
-     * of negative int16_t values.
-     */
-    encoded_temperature = (uint16_t)payload->temperature_centi_c;
+    buffer[0] = (uint8_t)payload->opcode;
 
-    buffer[0] = (uint8_t)(encoded_temperature & 0xFFU);
-    buffer[1] = (uint8_t)((encoded_temperature >> 8) & 0xFFU);
+    if (payload->opcode == NRF24L01_TEMPERATURE_OPCODE_READING)
+    {
+        /*
+         * Encode the signed temperature explicitly as little-endian.
+         *
+         * Casting to uint16_t preserves the two's-complement bit
+         * pattern of negative int16_t values.
+         */
+        uint16_t encoded_temperature =
+            (uint16_t)payload->temperature_centi_c;
+
+        buffer[1] = (uint8_t)(encoded_temperature & 0xFFU);
+        buffer[2] = (uint8_t)((encoded_temperature >> 8) & 0xFFU);
+
+        length = NRF24L01_TEMPERATURE_READING_PAYLOAD_SIZE;
+    }
+    else
+    {
+        length = NRF24L01_TEMPERATURE_REQUEST_PAYLOAD_SIZE;
+    }
 
     /*
      * CE must be low while changing TX_ADDR and RX_ADDR_P0.
@@ -721,7 +780,7 @@ uint8_t nrf24l01_temperature_send(
     if (nrf24l01_send(
             &gs_temperature_handle,
             buffer,
-            NRF24L01_TEMPERATURE_PAYLOAD_SIZE) != 0)
+            length) != 0)
     {
         return 1;
     }
@@ -738,30 +797,60 @@ uint8_t nrf24l01_temperature_decode(
     nrf24l01_temperature_payload_t *payload
 )
 {
-    uint16_t encoded_temperature;
-
     if (buf == NULL || payload == NULL)
     {
         return 1;
     }
 
-    if (len != NRF24L01_TEMPERATURE_PAYLOAD_SIZE)
+    if (len < NRF24L01_TEMPERATURE_OPCODE_SIZE)
     {
         return 1;
     }
 
-    /*
-     * Reconstruct the signed temperature from the little-endian
-     * two-byte radio representation.
-     */
-    encoded_temperature =
-        (uint16_t)buf[0] |
-        ((uint16_t)buf[1] << 8);
+    payload->opcode = (nrf24l01_temperature_opcode_t)buf[0];
 
-    payload->temperature_centi_c =
-        (int16_t)encoded_temperature;
+    switch (payload->opcode)
+    {
+        case NRF24L01_TEMPERATURE_OPCODE_REQUEST:
+        {
+            if (len != NRF24L01_TEMPERATURE_REQUEST_PAYLOAD_SIZE)
+            {
+                return 1;
+            }
 
-    return 0;
+            payload->temperature_centi_c = 0;
+
+            return 0;
+        }
+
+        case NRF24L01_TEMPERATURE_OPCODE_READING:
+        {
+            uint16_t encoded_temperature;
+
+            if (len != NRF24L01_TEMPERATURE_READING_PAYLOAD_SIZE)
+            {
+                return 1;
+            }
+
+            /*
+             * Reconstruct the signed temperature from the
+             * little-endian two-byte radio representation.
+             */
+            encoded_temperature =
+                (uint16_t)buf[1] |
+                ((uint16_t)buf[2] << 8);
+
+            payload->temperature_centi_c =
+                (int16_t)encoded_temperature;
+
+            return 0;
+        }
+
+        default:
+        {
+            return 1;
+        }
+    }
 }
 
 #undef NRF24L01_TEMPERATURE_CHECK

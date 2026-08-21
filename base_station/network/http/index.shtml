@@ -12,9 +12,61 @@
 <body>
     <h1>IOT-Thermometer base station</h1>
     <p>Latest temperature: <span id="latest">--.--</span> &deg;C</p>
+    <p>
+        <button id="request" onclick="requestReading()">Request temperature</button>
+        <span id="request-status"></span>
+    </p>
     <canvas id="chart" width="720" height="300"></canvas>
     <script>
         var gsLastRawResponse = null;
+        var gsRequestBaselineTimestamp = null;
+        var gsRequestTimeoutHandle = null;
+        var REQUEST_TIMEOUT_MS = 3000;
+
+        function requestReading() {
+            var button = document.getElementById("request");
+            var status = document.getElementById("request-status");
+            var lastTimes = (JSON.parse(gsLastRawResponse || "{}").t) || [];
+
+            button.disabled = true;
+            status.textContent = "Requesting...";
+            gsRequestBaselineTimestamp = lastTimes.length > 0 ? lastTimes[lastTimes.length - 1] : null;
+
+            fetch("/request-temperature", { cache: "no-store" }).catch(function () {});
+
+            if (gsRequestTimeoutHandle !== null) {
+                clearTimeout(gsRequestTimeoutHandle);
+            }
+
+            gsRequestTimeoutHandle = setTimeout(function () {
+                button.disabled = false;
+                status.textContent = "No response.";
+                gsRequestBaselineTimestamp = null;
+                gsRequestTimeoutHandle = null;
+            }, REQUEST_TIMEOUT_MS);
+        }
+
+        function checkRequestFulfilled(times) {
+            var button = document.getElementById("request");
+            var status = document.getElementById("request-status");
+            var newestTimestamp = times.length > 0 ? times[times.length - 1] : null;
+
+            if (gsRequestBaselineTimestamp === null || newestTimestamp === null) {
+                return;
+            }
+            if (newestTimestamp === gsRequestBaselineTimestamp) {
+                return;
+            }
+
+            button.disabled = false;
+            status.textContent = "";
+            gsRequestBaselineTimestamp = null;
+
+            if (gsRequestTimeoutHandle !== null) {
+                clearTimeout(gsRequestTimeoutHandle);
+                gsRequestTimeoutHandle = null;
+            }
+        }
 
         function formatElapsed(ms) {
             var totalSeconds = Math.floor(ms / 1000);
@@ -102,6 +154,7 @@
                             values[values.length - 1].toFixed(2);
                     }
 
+                    checkRequestFulfilled(times);
                     drawChart(times, values);
                 })
                 .catch(function () { /* keep showing the last successful chart */ });

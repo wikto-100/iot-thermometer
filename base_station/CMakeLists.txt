@@ -89,6 +89,7 @@ pico_set_lwip_httpd_content(
     ${CMAKE_CURRENT_LIST_DIR}/network/http/404.html
     ${CMAKE_CURRENT_LIST_DIR}/network/http/index.shtml
     ${CMAKE_CURRENT_LIST_DIR}/network/http/temphist.json
+    ${CMAKE_CURRENT_LIST_DIR}/network/http/ack.json
 )
 
 

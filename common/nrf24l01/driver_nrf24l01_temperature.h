@@ -97,13 +97,30 @@ extern "C" {
     NRF24L01_OUTPUT_POWER_NEGATIVE_18_DBM
 
 /*
- * One temperature value encoded as signed hundredths of a degree Celsius.
+ * Wire payload: a one-byte opcode, optionally followed by a temperature
+ * value encoded as signed hundredths of a degree Celsius.
  *
- * Example:
+ * REQUEST packets carry only the opcode byte.
+ * READING packets carry the opcode byte followed by the two-byte value.
+ *
+ * Example READING value:
  *     2345  means  23.45 °C
  *     -725  means  -7.25 °C
  */
-#define NRF24L01_TEMPERATURE_PAYLOAD_SIZE                   2U
+#define NRF24L01_TEMPERATURE_OPCODE_SIZE                    1U
+#define NRF24L01_TEMPERATURE_VALUE_SIZE                     2U
+#define NRF24L01_TEMPERATURE_REQUEST_PAYLOAD_SIZE            \
+    NRF24L01_TEMPERATURE_OPCODE_SIZE
+#define NRF24L01_TEMPERATURE_READING_PAYLOAD_SIZE            \
+    (NRF24L01_TEMPERATURE_OPCODE_SIZE + NRF24L01_TEMPERATURE_VALUE_SIZE)
+
+/*
+ * Largest payload this protocol ever sends or receives. Pipe widths and
+ * intermediate buffers are sized from this; dynamic payload length
+ * (below) is what actually lets REQUEST and READING differ in size.
+ */
+#define NRF24L01_TEMPERATURE_PAYLOAD_SIZE                    \
+    NRF24L01_TEMPERATURE_READING_PAYLOAD_SIZE
 
 /*
  * Static payload widths.
@@ -177,10 +194,25 @@ typedef enum
 } nrf24l01_temperature_type_t;
 
 /**
+ * @brief Temperature payload opcode
+ */
+typedef enum
+{
+    /* No reading attached; asks the peer to reply with a READING. */
+    NRF24L01_TEMPERATURE_OPCODE_REQUEST = 0x00,
+
+    /* Carries a temperature reading. */
+    NRF24L01_TEMPERATURE_OPCODE_READING = 0x01
+} nrf24l01_temperature_opcode_t;
+
+/**
  * @brief Temperature payload transmitted over the radio
  */
 typedef struct
 {
+    nrf24l01_temperature_opcode_t opcode;
+
+    /* Only meaningful when opcode is NRF24L01_TEMPERATURE_OPCODE_READING. */
     int16_t temperature_centi_c;
 } nrf24l01_temperature_payload_t;
 
@@ -222,7 +254,27 @@ uint8_t nrf24l01_temperature_init(
 uint8_t nrf24l01_temperature_deinit(void);
 
 /**
+ * @brief Switch the already-initialized radio between TX and RX at runtime
+ *
+ * Unlike nrf24l01_temperature_init(), this only flips the PRIM_RX bit
+ * (with CE held low while doing so) and leaves every other setting
+ * untouched, so it is cheap enough to call for every request/response
+ * round trip.
+ *
+ * @param[in] type TX or RX operating mode
+ *
+ * @return 0 on success, 1 on failure
+ */
+uint8_t nrf24l01_temperature_set_mode(
+    nrf24l01_temperature_type_t type
+);
+
+/**
  * @brief Send one temperature payload
+ *
+ * Sends a REQUEST (opcode only) or READING (opcode plus value)
+ * depending on payload->opcode. The radio must already be in TX mode
+ * (see nrf24l01_temperature_set_mode()).
  *
  * @param[in] payload temperature payload
  *
@@ -234,6 +286,9 @@ uint8_t nrf24l01_temperature_send(
 
 /**
  * @brief Decode a received temperature payload
+ *
+ * Recognizes both REQUEST and READING wire formats via the leading
+ * opcode byte and validates the length that opcode implies.
  *
  * @param[in]  buf raw payload bytes
  * @param[in]  len raw payload length

@@ -19,6 +19,9 @@ flowchart TB
     end
 ```
 
+## Screenshot
+
+<img src="docs/images/base-station-web-page.jpg" alt="The base station's web page open on a phone, showing the latest temperature and a bar chart of recent readings" width="360">
 
 ## Project structure
 

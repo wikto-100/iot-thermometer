@@ -33,6 +33,42 @@
  * <tr><td>2021/11/28  <td>1.0      <td>Shifeng Li  <td>first upload
  * </table>
  */
+/*
+ * ============================================================================
+ * NRF24L01+ INTERFACE - THE RASPBERRY PI PICO SPECIFIC "GLUE"
+ * ============================================================================
+ *
+ * This file is what the big "LINK pattern" comment at the top of
+ * driver_nrf24l01_temperature.c (in this same folder) refers to: it is the
+ * set of small functions that actually know how to talk to THIS chip
+ * (RP2350) and THIS specific wiring, filling in the "how do I do a basic
+ * hardware operation" details the vendored, hardware-independent
+ * nRF24L01+ driver (../../external/nrf24l01/) needs but does not know how
+ * to do itself. Both boards use this exact same file, since both wire
+ * their nRF24L01+ chip to the same set of pins.
+ *
+ * WHAT IS SPI?
+ * SPI ("Serial Peripheral Interface") is a simple, very common way for a
+ * microcontroller to talk to a nearby chip over a handful of wires: one
+ * wire carries data FROM the Pico TO the chip (MOSI, "master out, slave
+ * in"), one carries data the other way (MISO, "master in, slave out"),
+ * one is a shared clock signal that keeps both sides in sync bit-by-bit
+ * (SCK), and one, "chip select" (here called CSN, since it is
+ * active-LOW - see the temperature driver's IRQ pin explanation for what
+ * "active-low" means), tells the chip "the next few bits are meant for
+ * you" - this matters because several different chips can share the same
+ * MOSI/MISO/SCK wires, each with its OWN separate chip-select wire, so the
+ * microcontroller can talk to one at a time. This project's nRF24L01+
+ * chip is the only thing on this particular SPI bus, but the CSN handling
+ * below still follows the same standard protocol regardless.
+ *
+ * This file's functions are grouped into: SPI communication (talking to
+ * the chip), GPIO control (the separate CE pin, described in the
+ * temperature driver file), timing (delays), debug printing, and one
+ * default event-handling function that this project does not actually
+ * use (see nrf24l01_interface_receive_callback() near the bottom).
+ */
+
 #include <stdarg.h>
 #include <stdio.h>
 #include "driver_nrf24l01_interface.h"
@@ -41,9 +77,14 @@
 #include "FreeRTOS.h"
 #include "task.h"
 
+/* Which of the Pico's two built-in SPI hardware peripherals to use, and
+ * how fast to run it. */
 #define NRF24_SPI spi0
 #define NRF24_SPI_CLOCK_HZ 4000000u
 
+/* Which physical GPIO pins the nRF24L01+ chip is wired to. MISO/CSN/SCK/
+ * MOSI are the four SPI wires described above; CE ("chip enable") is the
+ * separate control pin explained in driver_nrf24l01_temperature.c. */
 #define NRF24_MISO_PIN 16u
 #define NRF24_CSN_PIN 17u
 #define NRF24_SCK_PIN 18u
@@ -56,6 +97,17 @@
  *         - 0 success
  *         - 1 spi init failed
  * @note   none
+ *
+ * CSN ("chip select, active low") starts HIGH (deselected/idle) - see the
+ * "what is SPI" explanation at the top of this file for why. The three
+ * MISO/MOSI/SCK pins are handed over to the Pico's dedicated SPI hardware
+ * peripheral (gpio_set_function(..., GPIO_FUNC_SPI)) rather than being
+ * driven manually, which is both faster and simpler than "bit-banging" SPI
+ * by hand in software. spi_set_format() configures the details the
+ * nRF24L01+ chip's datasheet requires: 8 data bits per transfer, clock
+ * idles low with data sampled on the leading edge (CPOL=0, CPHA=0 - one of
+ * four standard SPI "modes"), and the most-significant bit of each byte
+ * sent first.
  */
 uint8_t nrf24l01_interface_spi_init(void)
 {
@@ -107,6 +159,15 @@ uint8_t nrf24l01_interface_spi_deinit(void)
  *             - 0 success
  *             - 1 read failed
  * @note       none
+ *
+ * Every single SPI conversation with the chip follows this same shape:
+ * pull CSN LOW to say "listen to me now", send the one-byte command that
+ * says which register we want, then send/receive the actual data, then
+ * pull CSN back HIGH to say "done talking to you". This function is the
+ * "read" version: after the command byte, it reads len bytes of data back
+ * from the chip (sending 0xFF as filler while doing so, since SPI always
+ * transfers data in both directions at once, even when only one direction
+ * actually matters).
  */
 uint8_t nrf24l01_interface_spi_read(uint8_t reg, uint8_t *buf, uint16_t len)
 {
@@ -155,6 +216,10 @@ uint8_t nrf24l01_interface_spi_read(uint8_t reg, uint8_t *buf, uint16_t len)
  *            - 0 success
  *            - 1 write failed
  * @note      none
+ *
+ * The write counterpart to nrf24l01_interface_spi_read() above - same
+ * CSN-low / command-byte / data / CSN-high shape, just sending buf's
+ * contents to the chip instead of reading the chip's data back into it.
  */
 uint8_t nrf24l01_interface_spi_write(uint8_t reg, uint8_t *buf, uint16_t len)
 {
@@ -195,6 +260,11 @@ uint8_t nrf24l01_interface_spi_write(uint8_t reg, uint8_t *buf, uint16_t len)
  *         - 0 success
  *         - 1 init failed
  * @note   none
+ *
+ * This is the CE ("chip enable") pin - see the "keep CE low" explanation
+ * in driver_nrf24l01_temperature.c's nrf24l01_temperature_configure()
+ * function for what it controls. It starts LOW (inactive) here at
+ * startup, and is only raised once the chip has been fully configured.
  */
 uint8_t nrf24l01_interface_gpio_init(void)
 {
@@ -237,6 +307,16 @@ uint8_t nrf24l01_interface_gpio_write(uint8_t data)
  * @brief     interface delay ms
  * @param[in] ms time
  * @note      none
+ *
+ * vTaskDelay() is FreeRTOS's normal "pause this task" function - it works
+ * in "ticks" (see configTICK_RATE_HZ in FreeRTOSConfig.h), not
+ * milliseconds directly, so pdMS_TO_TICKS() converts the requested
+ * millisecond count into the matching number of ticks. The small check
+ * below guards against a subtle rounding trap: if the caller asked for a
+ * very small delay that would round DOWN to 0 ticks, vTaskDelay(0) would
+ * not actually pause at all - this bumps it up to a minimum of 1 tick
+ * instead, so "delay a little bit" never accidentally means "don't delay
+ * at all".
  */
 void nrf24l01_interface_delay_ms(uint32_t ms)
 {
@@ -254,6 +334,15 @@ void nrf24l01_interface_delay_ms(uint32_t ms)
  * @brief     interface print format data
  * @param[in] fmt format data
  * @note      none
+ *
+ * A small wrapper around the standard C library's vprintf(), which prints
+ * formatted text (the same "%s", "%d" style formatting as printf()) using
+ * a va_list - the mechanism C uses for functions like this one that accept
+ * a variable number of arguments (the "..." in this function's own
+ * signature). This is the function every "...debug_print(...)" call
+ * throughout this project's radio code ultimately goes through, over
+ * whichever console stdio_init_all() set up (see app/main.c on either
+ * board).
  */
 void nrf24l01_interface_debug_print(const char *const fmt, ...)
 {
@@ -270,6 +359,20 @@ void nrf24l01_interface_debug_print(const char *const fmt, ...)
  * @param[in] *buf pointer to a data buffer
  * @param[in] len buffer length
  * @note      none
+ *
+ * IMPORTANT: despite its name, this particular function is NOT actually
+ * used anywhere in this project's real operation - it is a leftover
+ * default/example implementation from the vendored driver's own template
+ * pattern (every board that uses this driver is expected to provide a
+ * "receive callback" function with THIS exact shape; this happens to be
+ * the generic example one). Both real boards instead provide their OWN
+ * callback function and link it in via DRIVER_NRF24L01_LINK_RECEIVE_CALLBACK
+ * inside driver_nrf24l01_temperature.c's nrf24l01_temperature_init() - see
+ * temperature_receiver_callback() in
+ * base_station/temperature/temperature_receiver.c, or
+ * temperature_sender_callback() in
+ * sensor/nrf24l01/temperature_sender.c, for the functions that ACTUALLY
+ * run when the radio has something to report.
  */
 void nrf24l01_interface_receive_callback(uint8_t type, uint8_t num, uint8_t *buf, uint8_t len)
 {

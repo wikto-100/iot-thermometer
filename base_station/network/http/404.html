@@ -1,3 +1,12 @@
+<!--
+    The page lwIP's web server sends back automatically whenever a browser
+    asks for a URL that does not exist on this device (see
+    pico_set_lwip_httpd_content() in ../../CMakeLists.txt, which is what
+    bakes this file into the program so lwIP can find it). The
+    "http-equiv=refresh content=2" line tells the browser to reload the
+    page automatically after 2 seconds, in case the person just mistyped
+    the address and the correct page is only a moment away.
+-->
 <html>
 <head>
     <title>IOT-Thermometer base station</title>

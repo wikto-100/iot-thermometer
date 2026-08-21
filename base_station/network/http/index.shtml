@@ -1,3 +1,27 @@
+<!--
+    ============================================================================
+    THE WEB PAGE - WHAT A BROWSER SEES
+    ============================================================================
+
+    This is the page a browser shows when you visit the base station's IP
+    address. Its ".shtml" extension is a leftover from an earlier version
+    of this page that filled in a live value directly here, using a
+    mechanism called "SSI" (see ../../web/temperature_ssi.c for the full
+    explanation of how that works). This page no longer does that itself -
+    that same mechanism is now used inside the separate temphist.json file
+    that this page's JavaScript fetches instead - so the ".shtml" extension
+    is no longer strictly required here, but does not hurt anything either.
+
+    Everything on this page happens in one of two ways:
+      1. A person clicks the "Request temperature" button, which asks the
+         base station to fetch a brand new reading from the sensor right
+         now (see requestReading() below).
+      2. Once a second, forever, this page quietly re-fetches the latest
+         temperature history and redraws the chart if anything changed (see
+         refresh() below) - this is called "polling": instead of the base
+         station pushing updates to the browser, the browser periodically
+         asks "anything new?" on its own.
+-->
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -16,28 +40,105 @@
         <button id="request" onclick="requestReading()">Request temperature</button>
         <span id="request-status"></span>
     </p>
+    <!--
+        A <canvas> is a blank rectangle a browser lets JavaScript draw
+        directly onto, pixel by pixel - lines, rectangles, text, anything -
+        using its own small drawing API. We use it below to draw the bar
+        chart by hand, without needing any external charting library.
+    -->
     <canvas id="chart" width="720" height="300"></canvas>
     <script>
+        /*
+         * ====================================================================
+         * PAGE STATE (variables that remember something between function
+         * calls, for as long as this page stays open in the browser)
+         * ====================================================================
+         */
+
+        /* The exact text of the last successful reply from the base
+         * station, remembered so refresh() (further down) can tell whether
+         * anything has actually changed since last time, and skip
+         * redrawing the chart if not - redrawing is a little bit of work,
+         * and there is no point doing it again if the data is identical. */
         var gsLastRawResponse = null;
+
+        /* While a "Request temperature" click is in progress, this
+         * remembers the timestamp of whatever was the NEWEST reading right
+         * before we clicked. Once refresh() sees a reading with a DIFFERENT
+         * (newer) timestamp than this, that is how we know our request was
+         * actually answered - see checkRequestFulfilled() below. It is set
+         * back to null once we are not waiting for anything. */
         var gsRequestBaselineTimestamp = null;
+
+        /* The id returned by setTimeout() (see requestReading() below), so
+         * we can cancel the pending timeout early if a reply arrives before
+         * the timeout is reached. Also null when nothing is pending. */
         var gsRequestTimeoutHandle = null;
+
+        /* How long to wait for the sensor to reply to a request before
+         * giving up and telling the user "No response." (in milliseconds -
+         * 3000 = 3 seconds). Taking a fresh reading and sending it back can
+         * take up to roughly a second in the worst case, so 3 seconds
+         * leaves a comfortable margin. */
         var REQUEST_TIMEOUT_MS = 3000;
 
+        /**
+         * Runs when the "Request temperature" button is clicked.
+         *
+         * This does NOT wait around for an answer. It just fires off a
+         * request to the base station (which itself just wakes up a radio
+         * task and returns immediately - see ../../web/web_server.c) and
+         * then disables the button, so it cannot be clicked again while a
+         * request is already in flight. The button gets re-enabled either
+         * when checkRequestFulfilled() (below) notices a new reading has
+         * shown up, or after REQUEST_TIMEOUT_MS passes with no answer,
+         * whichever happens first.
+         */
         function requestReading() {
             var button = document.getElementById("request");
             var status = document.getElementById("request-status");
+            /* Look at whatever data we already have on screen (from the
+             * last successful refresh()) and remember its newest
+             * timestamp, so we can later tell "has a NEW reading arrived
+             * since I clicked?" - see checkRequestFulfilled() below.
+             * (gsLastRawResponse might be null if this is the very first
+             * thing the user does before refresh() has ever completed,
+             * which is why "|| "{}"" falls back to an empty object rather
+             * than crashing.) */
             var lastTimes = (JSON.parse(gsLastRawResponse || "{}").t) || [];
 
             button.disabled = true;
             status.textContent = "Requesting...";
             gsRequestBaselineTimestamp = lastTimes.length > 0 ? lastTimes[lastTimes.length - 1] : null;
 
+            /*
+             * fetch() asks the browser to make an HTTP request in the
+             * background, without freezing the page while it waits. We do
+             * not care what comes back (see web_server.c: the response
+             * body is just a placeholder "{"ok":true}" file) - we only
+             * care that the REQUEST was sent, which is what tells the base
+             * station to talk to the sensor. ".catch(function () {})"
+             * quietly ignores any network error, since there is nothing
+             * useful this page could do about one anyway (the timeout
+             * below will eventually say "No response." either way).
+             */
             fetch("/request-temperature", { cache: "no-store" }).catch(function () {});
 
+            /* If a previous request's timeout is still pending (should not
+             * normally happen, since the button is disabled while one is
+             * in flight, but this is a safe guard either way), cancel it
+             * before starting a new one. */
             if (gsRequestTimeoutHandle !== null) {
                 clearTimeout(gsRequestTimeoutHandle);
             }
 
+            /*
+             * setTimeout() schedules the given function to run once, after
+             * the given number of milliseconds - here, "give up waiting".
+             * If checkRequestFulfilled() succeeds first, it cancels this
+             * timeout itself (see below), so this "give up" code only
+             * actually runs when nothing came back in time.
+             */
             gsRequestTimeoutHandle = setTimeout(function () {
                 button.disabled = false;
                 status.textContent = "No response.";
@@ -46,18 +147,38 @@
             }, REQUEST_TIMEOUT_MS);
         }
 
+        /**
+         * Checks whether a temperature request we sent has been answered
+         * yet, and if so, re-enables the button and clears the "waiting"
+         * status. Called every time refresh() (below) receives fresh data
+         * from the base station - which happens once a second regardless
+         * of whether a request is currently pending, so this function's
+         * very first job is to work out whether we are even waiting on
+         * anything right now.
+         *
+         * @param times The list of reading timestamps from the latest
+         *              server response (oldest first, newest last).
+         */
         function checkRequestFulfilled(times) {
             var button = document.getElementById("request");
             var status = document.getElementById("request-status");
             var newestTimestamp = times.length > 0 ? times[times.length - 1] : null;
 
+            /* Nothing to do if we are not currently waiting on a request,
+             * or if there is no data at all yet. */
             if (gsRequestBaselineTimestamp === null || newestTimestamp === null) {
                 return;
             }
+            /* The newest reading is still the SAME one that was already
+             * newest when we clicked the button - meaning no fresh reading
+             * has arrived yet, so keep waiting. */
             if (newestTimestamp === gsRequestBaselineTimestamp) {
                 return;
             }
 
+            /* The newest timestamp is different (newer) than it was when
+             * we clicked - a fresh reading has arrived, so our request
+             * succeeded. Clean everything up. */
             button.disabled = false;
             status.textContent = "";
             gsRequestBaselineTimestamp = null;
@@ -68,37 +189,95 @@
             }
         }
 
+        /**
+         * Turns a number of milliseconds into a short, readable label like
+         * "12s" or "1m05s", for the chart's horizontal axis. The base
+         * station has no real-world clock (see
+         * ../../temperature/temperature_store.h for why), so these
+         * timestamps only ever mean "this many milliseconds after the base
+         * station was turned on" - not an actual time of day.
+         *
+         * @param ms A timestamp in milliseconds since the base station
+         *           booted.
+         */
         function formatElapsed(ms) {
             var totalSeconds = Math.floor(ms / 1000);
             var minutes = Math.floor(totalSeconds / 60);
             var seconds = totalSeconds % 60;
+            /* Pad single-digit seconds with a leading zero (5 -> "05") so
+             * "1m5s" does not look like a typo for "15s". */
             var secondsText = seconds < 10 ? "0" + seconds : String(seconds);
 
             return minutes > 0 ? (minutes + "m" + secondsText + "s") : (seconds + "s");
         }
 
+        /**
+         * Draws the whole bar chart from scratch onto the <canvas>.
+         *
+         * A quick primer on how drawing on a <canvas> works, since the
+         * math below depends on it: the canvas has its own coordinate
+         * system measured in pixels, where (0, 0) is the TOP-LEFT corner,
+         * x increases to the RIGHT, and - importantly, and easy to trip
+         * over - y increases DOWNWARDS, not upwards like a normal graph.
+         * That is why, further down, a taller bar is drawn by starting
+         * FURTHER UP (a smaller y value) rather than further down.
+         *
+         * @param times  Reading timestamps, oldest first (used for the
+         *               horizontal axis labels).
+         * @param values Matching temperature values (used for both the bar
+         *               heights and the vertical axis labels).
+         */
         function drawChart(times, values) {
             var canvas = document.getElementById("chart");
+            /* getContext("2d") is how you get the actual drawing "pen" for
+             * a canvas - the object with methods like fillRect() and
+             * fillText() used throughout this function. */
             var ctx = canvas.getContext("2d");
             var width = canvas.width;
             var height = canvas.height;
+            /* "padding" reserves a margin around the edges of the canvas
+             * for axis labels, so the bars themselves do not get drawn
+             * right up against (or behind) the text. plotWidth/plotHeight
+             * is therefore the actual usable drawing area once that margin
+             * is subtracted. */
             var padding = { left: 55, right: 10, top: 10, bottom: 30 };
             var plotWidth = width - padding.left - padding.right;
             var plotHeight = height - padding.top - padding.bottom;
 
+            /* Wipe the entire canvas clean before drawing the new chart -
+             * otherwise every redraw would just pile new bars on top of
+             * the old ones. */
             ctx.clearRect(0, 0, width, height);
 
             if (values.length === 0) {
                 return;
             }
 
+            /*
+             * The vertical axis always spans a FIXED 0 to 100 degrees C,
+             * rather than automatically zooming in to whatever the actual
+             * highest/lowest reading happens to be. This is a deliberate
+             * choice: with a fixed scale, a small temperature change
+             * always looks like a small change on the chart, and a bar's
+             * height can be compared meaningfully between one glance at
+             * the page and the next. An automatically-rescaling axis would
+             * make even tiny, meaningless fluctuations look dramatic.
+             */
             var minValue = 0;
             var maxValue = 100;
             var valueRange = maxValue - minValue;
             var barCount = values.length;
+            /* Divide the available width evenly between however many bars
+             * we have. Each bar gets its own "slot", but the bar drawn
+             * inside that slot is only 70% as wide as the slot itself
+             * (barWidth), so there is a visible gap between neighbouring
+             * bars instead of one solid block of colour. */
             var barSlot = plotWidth / barCount;
             var barWidth = Math.max(barSlot * 0.7, 1);
 
+            /* Draw the two axis lines (a vertical line up the left side,
+             * then a horizontal line along the bottom) - together they
+             * form an "L" shape framing the chart. */
             ctx.strokeStyle = "#333";
             ctx.beginPath();
             ctx.moveTo(padding.left, padding.top);
@@ -106,15 +285,34 @@
             ctx.lineTo(padding.left + plotWidth, padding.top + plotHeight);
             ctx.stroke();
 
+            /* Draw one bar per reading. */
             ctx.fillStyle = "#3366cc";
             for (var i = 0; i < barCount; i++) {
+                /* "normalized" turns the actual temperature value into a
+                 * fraction between 0 (the coldest end of our fixed 0-100
+                 * scale) and 1 (the hottest end) - for example, a value of
+                 * 25 becomes 0.25. Multiplying that fraction by the
+                 * available plotHeight then gives the bar's height in
+                 * actual pixels. */
                 var normalized = (values[i] - minValue) / valueRange;
                 var barHeight = normalized * plotHeight;
+                /* Center this bar within its slot (see barSlot/barWidth
+                 * above) by adding half of the leftover, unused space on
+                 * each side. */
                 var x = padding.left + i * barSlot + (barSlot - barWidth) / 2;
+                /* Remember: y increases DOWNWARDS on a canvas. The bottom
+                 * of every bar is fixed at the chart's floor
+                 * (padding.top + plotHeight); a TALLER bar's TOP edge sits
+                 * FURTHER UP the page, which means a SMALLER y value - so
+                 * we subtract barHeight from the floor position, rather
+                 * than adding it. */
                 var y = padding.top + plotHeight - barHeight;
                 ctx.fillRect(x, y, barWidth, barHeight);
             }
 
+            /* Draw the vertical axis labels: 5 evenly spaced numbers from
+             * 0 to 100 (yTicks=4 means 4 gaps between 5 labels: 0, 25, 50,
+             * 75, 100), right-aligned just to the left of the axis line. */
             ctx.fillStyle = "#000";
             ctx.font = "10px sans-serif";
             ctx.textAlign = "right";
@@ -126,6 +324,11 @@
                 ctx.fillText(value.toFixed(2), padding.left - 5, y);
             }
 
+            /* Draw the horizontal axis labels: rather than labeling EVERY
+             * single bar (which would be far too cramped once there are
+             * many readings), skip ahead by xTickStep bars each time, so
+             * roughly 6 labels are shown no matter how many readings there
+             * are. */
             ctx.textAlign = "center";
             ctx.textBaseline = "top";
             var xTickStep = Math.max(Math.floor(barCount / 6), 1);
@@ -135,7 +338,23 @@
             }
         }
 
+        /**
+         * Fetches the latest temperature history from the base station and
+         * updates the page if anything has changed. Called once
+         * immediately when the page loads, and then automatically every
+         * second forever (see setInterval() at the bottom of this script) -
+         * this is the "polling" mentioned in the big comment at the top of
+         * this file.
+         */
         function refresh() {
+            /*
+             * Ask for /temphist.json - the file whose single SSI
+             * placeholder gets filled in with the current temperature
+             * history every time it is requested (see
+             * ../../web/temperature_ssi.c). "{ cache: "no-store" }" tells
+             * the browser not to reuse an old, cached copy of this file -
+             * we always want the freshest possible data.
+             */
             fetch("/temphist.json", { cache: "no-store" })
                 .then(function (response) { return response.text(); })
                 .then(function (rawText) {
@@ -145,6 +364,9 @@
                     }
                     gsLastRawResponse = rawText;
 
+                    /* JSON.parse() turns the raw text (something like
+                     * {"t":[1000,2000],"v":[21.30,21.35]}) into a real
+                     * JavaScript object we can read fields from directly. */
                     var data = JSON.parse(rawText);
                     var times = data.t || [];
                     var values = data.v || [];
@@ -157,10 +379,21 @@
                     checkRequestFulfilled(times);
                     drawChart(times, values);
                 })
+                /* If the fetch fails for any reason (Wi-Fi hiccup, page
+                 * loaded before the server was ready, etc.), just keep
+                 * showing whatever was drawn last time rather than
+                 * clearing the page - refresh() will simply try again in
+                 * another second regardless. */
                 .catch(function () { /* keep showing the last successful chart */ });
         }
 
+        /* Run refresh() once immediately, so the chart has real data as
+         * soon as the page finishes loading, instead of waiting a full
+         * second for the first automatic refresh below. */
         refresh();
+        /* Then keep calling refresh() automatically, forever, once every
+         * 1000 milliseconds (1 second), for as long as this page stays
+         * open. */
         setInterval(refresh, 1000);
     </script>
 </body>

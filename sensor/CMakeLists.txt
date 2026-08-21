@@ -1,3 +1,17 @@
+# ==============================================================================
+# SENSOR - BUILD CONFIGURATION (CMake)
+# ==============================================================================
+#
+# This project is built using CMake, a tool that reads a file like this one
+# (called "CMakeLists.txt") and turns it into the actual low-level build
+# instructions (a Makefile, or in this project's case, a "Ninja" build
+# file) that compile every .c file into machine code and link them all
+# together into the final program. In other words: this file is the
+# recipe that says "these are the source files, these are the libraries
+# we need, here is how to put it all together" for the sensor program -
+# the one that has the DS18B20 temperature sensor physically attached,
+# reads it, and sends readings wirelessly over an nRF24L01+ radio.
+#
 # Generated Cmake Pico project file
 
 cmake_minimum_required(VERSION 3.13)
@@ -23,6 +37,10 @@ if(EXISTS ${picoVscode})
     include(${picoVscode})
 endif()
 # ====================================================================================
+
+# Which physical board we are building for: a plain Raspberry Pi Pico 2
+# ("pico2"). All of its communication happens over the separate nRF24L01+ radio chip,
+# wired up over SPI.
 set(PICO_BOARD pico2 CACHE STRING "Board type")
 # Set the path for the FreeRTOS kernel
 set(FREERTOS_KERNEL_PATH
@@ -33,6 +51,13 @@ set(NRF24L01_PATH
     ${CMAKE_CURRENT_LIST_DIR}/../external/nrf24l01
 )
 # Set the path for the DS18B20 driver
+#
+# The DS18B20 is the actual temperature sensor chip attached to this
+# board - a separate, third-party ("vendored") driver library for it lives
+# in ../external/ds18b20, the same way the nRF24L01+ radio driver does.
+# This board's own ds18b20/driver_ds18b20_temperature.c is a thin wrapper
+# around it, with the specific settings this project needs (see that file
+# for details).
 set(DS18B20_PATH
     ${CMAKE_CURRENT_LIST_DIR}/../external/ds18b20
 )
@@ -54,9 +79,14 @@ project(sensor C CXX ASM)
 pico_sdk_init()
 
 # Add executable. Default name is the project name, version 0.1
-
+#
+# The full list of source files compiled into the "sensor" program: this
+# board's own application code, the radio driver, and the DS18B20 sensor
+# driver.
 add_executable(sensor
     sensor.cpp
+    ${COMMON_PATH}/task_utils.c
+    ${COMMON_PATH}/temperature_format.c
     ${COMMON_PATH}/hooks.cpp
     ${COMMON_PATH}/nrf24l01/driver_nrf24l01_interface.c
     ${COMMON_PATH}/nrf24l01/driver_nrf24l01_temperature.c
@@ -75,6 +105,11 @@ pico_enable_stdio_uart(sensor 1)
 pico_enable_stdio_usb(sensor 1)
 
 # Add the standard library to the build
+#
+# No networking libraries here (no lwIP, no CYW43 Wi-Fi integration) -
+# this board does no networking of its own; all of its communication
+# happens over the nRF24L01+ radio instead (built from source, above,
+# rather than being a pre-built library).
 target_link_libraries(sensor
     pico_stdlib
     hardware_spi
@@ -95,5 +130,7 @@ target_include_directories(sensor PRIVATE
     ${DS18B20_PATH}/interface
 )
 
+# Generates the additional output files alongside the main program: a
+# .uf2 file (the format used to flash the Pico by drag-and-drop), a .hex
+# file, a memory map, and so on.
 pico_add_extra_outputs(sensor)
-
